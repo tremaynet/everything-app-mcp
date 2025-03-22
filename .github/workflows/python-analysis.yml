@@ -1,0 +1,103 @@
+name: Python Code Analysis
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '**.py'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**.py'
+  # Manual trigger
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install boto3
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        npm install -g pyright
+        
+    - name: Run Pyright analysis
+      id: pyright
+      run: |
+        mkdir -p pyright_results
+        pyright --outputjson > pyright_results/analysis.json
+        
+    - name: Process Pyright results
+      id: process_results
+      run: |
+        python -c "
+import json
+import os
+
+# Load Pyright results
+with open('pyright_results/analysis.json', 'r') as f:
+    data = json.load(f)
+
+# Extract diagnostics
+diagnostics = data.get('generalDiagnostics', [])
+
+# Count issues by severity
+error_count = sum(1 for d in diagnostics if d.get('severity') == 'error')
+warning_count = sum(1 for d in diagnostics if d.get('severity') == 'warning')
+info_count = sum(1 for d in diagnostics if d.get('severity') == 'information')
+
+# Create summary file
+with open('pyright_results/summary.md', 'w') as f:
+    f.write(f'# Python Analysis Results\n\n')
+    f.write(f'* **Errors:** {error_count}\n')
+    f.write(f'* **Warnings:** {warning_count}\n')
+    f.write(f'* **Information:** {info_count}\n\n')
+    
+    if diagnostics:
+        f.write('## Detailed Issues\n\n')
+        for i, diag in enumerate(diagnostics):
+            severity = diag.get('severity', '').upper()
+            file_path = diag.get('file', 'Unknown file')
+            line = diag.get('range', {}).get('start', {}).get('line', 0) + 1
+            column = diag.get('range', {}).get('start', {}).get('character', 0) + 1
+            message = diag.get('message', 'No message')
+            
+            f.write(f'### {i+1}. [{severity}] {file_path}:{line}:{column}\n')
+            f.write(f'{message}\n\n')
+
+# Set output variables
+print(f'::set-output name=error_count::{error_count}')
+print(f'::set-output name=warning_count::{warning_count}')
+print(f'::set-output name=info_count::{info_count}')
+print(f'::set-output name=total_count::{error_count + warning_count + info_count}')
+        "
+
+    - name: Create GitHub issue for analysis results
+      if: steps.process_results.outputs.total_count > 0
+      uses: JasonEtco/create-an-issue@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ERROR_COUNT: ${{ steps.process_results.outputs.error_count }}
+        WARNING_COUNT: ${{ steps.process_results.outputs.warning_count }}
+        INFO_COUNT: ${{ steps.process_results.outputs.info_count }}
+        TOTAL_COUNT: ${{ steps.process_results.outputs.total_count }}
+      with:
+        filename: pyright_results/summary.md
+        update_existing: true
+        search_existing: open
+        
+    - name: Upload analysis results
+      uses: actions/upload-artifact@v3
+      with:
+        name: pyright-results
+        path: pyright_results/
